@@ -62,7 +62,7 @@ def cost_frac(o, dv, is_crypto):
     """Per-unit-exposure switching cost under ClawStreet's published formula:
     commission ($0.005/share stocks, 5 bps crypto) + slippage (notional/dv * 50bps)."""
     comm = np.where(is_crypto, 5e-4, 0.005 / o)
-    slip = (NOTIONAL / dv) * 50e-4
+    slip = (NOTIONAL / np.maximum(dv, 1e3)) * 50e-4  # guard: yahoo can emit v=0 rows
     return comm + slip
 
 
