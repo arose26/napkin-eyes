@@ -68,7 +68,51 @@ baselines ran on). Test is touched once per arm, after all training.
 
 ## Results
 
-*(to be filled after the sweep — predictions above are frozen first)*
+Ran 2026-08-19 on a Colab T4 (60 runs, ~40 min). Test window 2026-06-01 → 2026-08-18
+(54 bars); buy-and-hold on the same window and universe: **−0.27%** (window-sensitive:
+from June 8 it's +3.67% — the basket swung ~4 pp that week; comparisons below use the
+matched window).
+
+![results](assets/hero.png)
+
+| arm | test IQM | 95% CI |
+|---|---|---|
+| raw10 | **+1.18%** | [−1.53, +3.56] |
+| raw20pos | −0.84% | [−2.46, +2.26] |
+| indic | −1.33% | [−3.53, +1.53] |
+| norm20 | −1.58% | [−3.17, +0.32] |
+| raw60 | −1.86% | [−4.41, +0.05] |
+| raw20 | −2.26% | [−6.09, +1.98] |
+
+Verdicts on the frozen hypotheses, ties reported as ties:
+
+1. **norm20 > raw20 — tie.** Direction as predicted (−1.58 vs −2.26) but the CIs
+   swallow the gap whole.
+2. **indic ≈ norm20 — confirmed tie** (−1.33 vs −1.58).
+3. **raw20pos ≈ raw20 — confirmed tie**, with the point estimate mildly favoring
+   position-awareness (−0.84 vs −2.26) — not the significant win that would have made
+   it interesting.
+4. **Horizon — refuted in direction.** raw10 outscored raw20 (+1.18 vs −2.26); the
+   registered prediction had it backwards. Formally still a tie by CI, but the point
+   ranking says *less* context, not more (consistent with overfitting ~10k distinct
+   train states with wider inputs). raw60 ≈ raw20 held.
+5. **The honest null — holds.** No arm significantly beats same-window buy-and-hold;
+   every arm's CI contains 0 (no arm significantly makes money at all).
+
+**What actually matters for repo 3:** seed variance dwarfs arm differences — one arm's
+10 seeds span −9.4% to +5.9% on 54 test bars, and validation rank barely predicts test
+rank. Two carry-forwards, stated with their real justifications:
+
+- **Keep observations small — by parsimony, not victory.** Nothing here shows bigger
+  or fancier observations helping (all ties), and wider inputs add capacity to overfit
+  ~10k distinct train states. When arms tie, take the cheapest. This is a default, not
+  a measured winner.
+- **The luck lesson, scoped to where it applies:** in *this* market, on windows of
+  *this* length (a ~54-bar season — the same window length ClawStreet ranks on),
+  single-run return differences of several percent are seed noise. We ran the same
+  agent 10 times and got −9% to +6%. Every agent on that leaderboard is one seed.
+  That's the quantitative footing for repo 5's luck-share analysis — for this venue,
+  not a claim about benchmarks in general.
 
 ## Run it
 
