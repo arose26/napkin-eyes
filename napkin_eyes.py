@@ -364,6 +364,86 @@ def report():
               f"{[round(x, 1) for x in sorted(tv)]}")
 
 
+# ------------------------------------------------------------------- plot
+
+def bootstrap_ci(x, n_boot=2000, seed=0):
+    rng = np.random.default_rng(seed)
+    stats = [iqm(list(rng.choice(x, len(x)))) for _ in range(n_boot)]
+    return float(np.percentile(stats, 2.5)), float(np.percentile(stats, 97.5))
+
+
+def plot():
+    import glob
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    market = Market()
+    test_dates = market.dates[market.t_val_end + 1:]
+    # buy-and-hold reference on the same test window (per-symbol, equal weight)
+    c = np.exp(np.cumsum(market.logret, 0))
+    bh = (c[market.t_val_end + 1:] / c[market.t_val_end]).mean(1)
+
+    C = {"raw10": "#2a78d6", "raw20": "#eb6834", "raw60": "#1baf7a",
+         "norm20": "#eda100", "indic": "#e87ba4", "raw20pos": "#008300"}
+    INK, MUTED = "#1a1a19", "#6f6e64"
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 4.4), dpi=150,
+                                   gridspec_kw={"width_ratios": [3, 2]})
+    fig.patch.set_facecolor("white")
+    for ax in (ax1, ax2):
+        ax.set_facecolor("white")
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+        for s in ("left", "bottom"):
+            ax.spines[s].set_color(MUTED)
+        ax.tick_params(colors=MUTED, labelsize=8)
+        ax.grid(axis="y", color="#e6e5dc", lw=0.6)
+        ax.set_axisbelow(True)
+
+    stats = {}
+    for arm in ARMS:
+        rs = [json.load(open(f)) for f in
+              sorted(glob.glob(os.path.join(OUT, "sweep", f"{arm}_*.json")))]
+        if not rs:
+            continue
+        curves = np.array([r["test_curve"] for r in rs])
+        med = np.median(curves, 0) * 100 - 100
+        ax1.plot(med, color=C[arm], lw=1.8)
+        ax1.annotate(f" {arm} {med[-1]:+.1f}%", (len(med) - 1, med[-1]),
+                     color=C[arm], fontsize=8, fontweight="bold", va="center")
+        rets = [r["test_return_pct"] for r in rs]
+        stats[arm] = (iqm(rets), *bootstrap_ci(rets))
+    ax1.plot((bh - 1) * 100, color=MUTED, lw=1.4, ls="--")
+    ax1.annotate(f" buy&hold {(bh[-1]-1)*100:+.1f}%", (len(bh) - 1, (bh[-1] - 1) * 100),
+                 color=MUTED, fontsize=8, fontweight="bold", va="center")
+    xt = list(range(0, len(test_dates), max(1, len(test_dates) // 4)))
+    ax1.set_xticks(xt, [test_dates[i][5:] for i in xt])
+    ax1.set_xlim(0, len(test_dates) * 1.3)
+    ax1.set_title("Held-out test weeks: median equity curve per observation arm",
+                  color=INK, fontsize=10, loc="left")
+    ax1.set_ylabel("return %", color=MUTED, fontsize=8)
+
+    arms = [a for a in ARMS if a in stats]
+    y = np.arange(len(arms))
+    vals = [stats[a][0] for a in arms]
+    err = np.array([[stats[a][0] - stats[a][1] for a in arms],
+                    [stats[a][2] - stats[a][0] for a in arms]])
+    ax2.barh(y, vals, xerr=err, height=0.62, color=[C[a] for a in arms],
+             error_kw={"ecolor": MUTED, "lw": 1.2})
+    ax2.axvline((bh[-1] - 1) * 100, color=MUTED, lw=1.4, ls="--")
+    ax2.set_yticks(y, arms)
+    ax2.invert_yaxis()
+    ax2.set_title("Test IQM + 95% bootstrap CI (10 seeds)", color=INK,
+                  fontsize=10, loc="left")
+    ax2.set_xlabel("test return %", color=MUTED, fontsize=8)
+
+    fig.tight_layout()
+    os.makedirs(os.path.join(HERE, "assets"), exist_ok=True)
+    out = os.path.join(HERE, "assets", "hero.png")
+    fig.savefig(out, bbox_inches="tight")
+    print("wrote", out)
+
+
 # ------------------------------------------------------------------- selfcheck
 
 def selfcheck():
@@ -478,4 +558,4 @@ if __name__ == "__main__":
     elif cmd == "report":
         report()
     else:
-        {"selfcheck": selfcheck}[cmd]()
+        {"selfcheck": selfcheck, "plot": plot}[cmd]()
