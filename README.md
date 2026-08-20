@@ -92,6 +92,24 @@ Verdicts on the frozen hypotheses (trained on 10-year tape):
 
 **What actually matters for repo 3:** Seed variance still dwarfs observation choices, and larger input windows (`raw60`) overfit. `raw10` or `raw20` remain the optimal parsimonious choices.
 
+## Tape alignment (added after the sweep)
+
+`load_tape` / `Market` take `align=`:
+
+| mode | bars | what it does |
+|---|---|---|
+| `intersect` *(default)* | 1,298 | keeps only dates present for **every** symbol — simple, and what every published number in this series was computed on |
+| `ragged` | **2,512** | keeps the stock trading calendar and masks a symbol before its first bar |
+
+The default throws away every bar before the *latest* listing in the universe. `X:SOLUSD` starts
+2021-06-17, so ten years on disk became 5.2 usable years — **48% of the history discarded by one
+symbol**. `ragged` recovers it: `Market.valid` [T, S] marks availability, `Market.t_start` gives
+each symbol's first bar, and `sample_starts` draws episode starts per symbol so a sampler can
+never touch a cell that has no data (asserted in `selfcheck` over 4,096 draws).
+
+The default is deliberately left as `intersect` so this repo's results stay reproducible;
+downstream training that wants the full history opts in (napkin-gap's deploy nets now do).
+
 ## Run it
 
 ```bash

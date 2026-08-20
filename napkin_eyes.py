@@ -41,16 +41,38 @@ SEEDS = 10
 
 # ------------------------------------------------------------------- tape
 
-def load_tape():
-    """Aligned daily bulk bars -> dates plus open/close/dollar-volume [T, S]."""
+def load_tape(align="intersect"):
+    """Aligned daily bulk bars -> dates plus open/close/dollar-volume [T, S].
+
+    align="intersect" (default, and what every published result in this series
+    used): keep only dates present for EVERY symbol. Simple, but one late
+    listing truncates the whole panel -- X:SOLUSD starts 2021-06-17 and so
+    discarded ~half of the ten years on disk.
+
+    align="ragged": keep the stock trading calendar and let late listers be
+    absent before their first bar. A date survives if some stock traded it and
+    every symbol that has ALREADY STARTED has a bar for it, which drops crypto
+    weekends exactly as intersect does. Missing cells are NaN here and are
+    masked by `Market.valid`; nothing may read them.
+    """
     by_sym = {}
     for sym in UNIVERSE:
         p = os.path.join(TAPE, sym.replace(":", "_") + ".bulk.jsonl")
         by_sym[sym] = {r["date"]: r for r in map(json.loads, open(p))}
-    dates = sorted(set.intersection(*(set(v) for v in by_sym.values())))
-    o = np.array([[by_sym[s][d]["o"] for s in UNIVERSE] for d in dates], np.float64)
-    c = np.array([[by_sym[s][d]["c"] for s in UNIVERSE] for d in dates], np.float64)
-    v = np.array([[by_sym[s][d]["v"] for s in UNIVERSE] for d in dates], np.float64)
+    if align == "intersect":
+        dates = sorted(set.intersection(*(set(v) for v in by_sym.values())))
+    elif align == "ragged":
+        starts = {s: min(by_sym[s]) for s in UNIVERSE}
+        stock_days = set.union(*(set(by_sym[s]) for s in STOCKS))
+        dates = sorted(d for d in stock_days
+                       if all(d in by_sym[s] for s in UNIVERSE if starts[s] <= d))
+    else:
+        raise ValueError(f"align must be 'intersect' or 'ragged', got {align!r}")
+    nan = float("nan")
+    def col(field):
+        return np.array([[by_sym[s][d][field] if d in by_sym[s] else nan
+                          for s in UNIVERSE] for d in dates], np.float64)
+    o, c, v = col("o"), col("c"), col("v")
     dv = np.zeros_like(c)
     for t in range(len(dates)):                    # trailing 20-bar dollar volume
         lo = max(0, t - 19)
@@ -66,13 +88,27 @@ def cost_frac(o, dv, is_crypto):
     return comm + slip
 
 
+def sample_starts(market, sym, h, train_end, gen):
+    """Episode starts for symbols `sym`, uniform per symbol over the bars where
+    that symbol has h bars of history. Under align="ragged" a late lister has no
+    data before its first bar, so a shared lower bound would sample cells that
+    do not exist; this keeps every drawn (t, s) valid by construction and the
+    selfcheck asserts it."""
+    lo = torch.clamp(market.t_start[sym] + h, min=h)
+    hi = train_end - EP_LEN - NSTEP
+    assert int(lo.max()) < hi, "a symbol has no usable training window"
+    u = torch.rand(len(sym), generator=gen).to(lo.device)
+    return (lo + (u * (hi - lo)).long()).clamp(max=hi - 1)
+
+
 class Market:
     """Tensorized market shared by env + eval. Time index t is a bar; a step
     t -> t+1 holds p_old over the close->open gap, trades to p_new at the open
     (cost on |dp|), and rides p_new open->close. Daily-rebalanced +-1x exposure."""
 
-    def __init__(self):
-        self.dates, o, c, dv = load_tape()
+    def __init__(self, align="intersect"):
+        self.align = align
+        self.dates, o, c, dv = load_tape(align)
         is_crypto = np.array([s.startswith("X:") for s in UNIVERSE])
         self.gap = torch.tensor(o[1:] / c[:-1] - 1, dtype=torch.float32, device=DEV)
         self.day = torch.tensor(c[1:] / o[1:] - 1, dtype=torch.float32, device=DEV)
@@ -82,6 +118,15 @@ class Market:
         self.T, self.S = self.gap.shape[0], len(UNIVERSE)  # step t: bar t -> t+1
         self.t_train_end = sum(1 for d in self.dates if d < TRAIN_END)
         self.t_val_end = sum(1 for d in self.dates if d < VAL_END)
+        # Availability. A cell is valid once the symbol has a bar; ragged mode
+        # is the only mode where anything is invalid, so intersect keeps the
+        # exact behaviour every published number was computed with.
+        have = ~np.isnan(c)                                   # [T+1, S] raw bars
+        self.t_start = torch.tensor(have.argmax(0), dtype=torch.long, device=DEV)
+        self.valid = torch.tensor(have[1:], device=DEV)        # aligned to steps
+        for arr in (self.gap, self.day, self.cost):            # never read, but
+            arr[~self.valid] = 0.0                             # keep NaN out
+        self.logret = np.nan_to_num(self.logret, nan=0.0)
 
     def step_factor(self, t, s, p_old, p_new):
         """Equity multiplier for step t on symbols s (all torch, batched)."""
@@ -264,8 +309,7 @@ def train(arm, seed, market=None, feat=None, quiet=False, vec_steps=VEC_STEPS):
     def reset():
         h = 61                                      # deepest obs window + margin
         s = torch.randint(0, market.S, (N_ENVS,), generator=g).to(DEV)
-        t = torch.randint(h, market.t_train_end - EP_LEN - NSTEP,
-                          (N_ENVS,), generator=g).to(DEV)
+        t = sample_starts(market, s, h, market.t_train_end, g)
         return s, t, torch.zeros(N_ENVS, device=DEV)
 
     sym, t, pos = reset()
@@ -451,6 +495,27 @@ def selfcheck():
     print(f"tape: {market.T + 1} bars x {market.S} symbols, "
           f"train<{TRAIN_END} ({market.t_train_end}), val<{VAL_END} "
           f"({market.t_val_end - market.t_train_end}), test ({market.T - market.t_val_end})")
+
+    # 0. alignment. intersect is frozen -- every published number in this series
+    # was computed on it -- and ragged must recover the history one late listing
+    # was costing us, while never handing the sampler a cell that has no data.
+    assert market.align == "intersect" and bool(market.valid.all())
+    rag = Market(align="ragged")
+    assert rag.T > market.T, (rag.T, market.T)
+    late = [(UNIVERSE[i], int(t)) for i, t in enumerate(rag.t_start) if t > 0]
+    assert all(int(t) == 0 for t in market.t_start), "intersect must be square"
+    assert bool(rag.valid[:, [i for i, t in enumerate(rag.t_start) if t == 0]].all())
+    for i, t0 in enumerate(rag.t_start):
+        assert not bool(rag.valid[:max(int(t0) - 1, 0), i].any()), UNIVERSE[i]
+        assert bool(rag.valid[int(t0):, i].all()), UNIVERSE[i]
+    g = torch.Generator(device="cpu").manual_seed(0)
+    sym = torch.randint(0, rag.S, (4096,), generator=g).to(DEV)
+    ts = sample_starts(rag, sym, 61, rag.t_train_end, g)
+    assert bool(rag.valid[ts, sym].all()), "sampled a start with no data"
+    assert bool((ts >= rag.t_start[sym]).all()) and bool((ts >= 61).all())
+    print(f"alignment: intersect {market.T + 1} bars (frozen), ragged "
+          f"{rag.T + 1} bars = {(rag.T + 1) / (market.T + 1):.2f}x; "
+          f"late listings {late}; 4096 sampled starts all valid")
 
     # 1. GPU env == napkin-tape CPU reference on a scripted daily-rebalance policy
     sys.path.insert(0, os.path.join(HERE, "..", "napkin-tape"))
